@@ -14,7 +14,7 @@ class VehicleDetector:
     """Detects vehicles in frames using YOLOv8."""
 
     # COCO class IDs for vehicles
-    VEHICLE_CLASSES = {2: 'car', 5: 'bus', 7: 'truck'}
+    VEHICLE_CLASSES = {2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck'}
 
     def __init__(self, model_size='yolov8m', confidence_threshold=0.35):
         """

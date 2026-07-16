@@ -33,6 +33,7 @@ CATEGORY_COLORS = {
     'car':   hex_to_bgr('3399FF'),  # Blue
     'bus':   hex_to_bgr('FF9933'),  # Orange
     'truck': hex_to_bgr('FF33CC'),  # Pink
+    'motorcycle': hex_to_bgr('FFFF00'), # Yellow
 }
 
 # Fixed face colors (matching reference: front=green, rear=red)
@@ -41,7 +42,7 @@ REAR_COLOR  = (0, 0, 255)    # Red
 
 
 def draw_3d_bbox(frame, corners_2d, vehicle_type='car', confidence=1.0,
-                 line_thickness=2, show_label=True, depth=None):
+                 line_thickness=2, show_label=True, depth=None, track_id=None):
     """
     Draw a 3D bounding box wireframe on the frame.
 
@@ -85,10 +86,12 @@ def draw_3d_bbox(frame, corners_2d, vehicle_type='car', confidence=1.0,
     for i, j in SIDE_EDGES:
         cv2.line(frame, tuple(pts[i]), tuple(pts[j]), category_color, line_thickness)
 
-    # Optional: draw label with confidence and depth
-    if show_label and depth is not None:
+    if show_label:
         label_pt = (pts[4][0], pts[4][1] - 8)
-        label_text = f'{vehicle_type} {confidence:.2f} ({depth:.1f}m)'
+        if track_id is not None:
+            label_text = f'{vehicle_type} #{track_id}'
+        else:
+            label_text = f'{vehicle_type}'
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
         thickness = 1

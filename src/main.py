@@ -177,7 +177,8 @@ def process_video(input_path, output_path, max_frames=None,
                          vehicle_type=vehicle_type,
                          confidence=conf,
                          depth=result['depth'],
-                         show_label=show_labels)
+                         show_label=show_labels,
+                         track_id=track_id)
 
         # Draw info overlay
         elapsed = time.time() - start_time

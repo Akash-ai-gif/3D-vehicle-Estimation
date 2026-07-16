@@ -20,6 +20,7 @@ VEHICLE_DIMENSIONS = {
     'car':   {'height': 1.52, 'width': 1.63, 'length': 3.88},
     'bus':   {'height': 3.20, 'width': 2.55, 'length': 10.0},
     'truck': {'height': 3.00, 'width': 2.50, 'length': 6.50},
+    'motorcycle': {'height': 1.50, 'width': 0.80, 'length': 2.20},
 }
 
 
@@ -63,102 +64,76 @@ class PoseEstimator:
         # Set to 0.7 to heavily prefer the new detection and minimize tracking lag!
         self.ema_alpha = 0.7
 
-    def estimate_depth(self, bbox, vehicle_type='car'):
-        """
-        Estimate depth (distance from camera) using the 2D bounding box
-        height and known average vehicle dimensions.
-
-        The idea: real_height / depth = pixel_height / focal_length
-        => depth = real_height * focal_length / pixel_height
-
-        Args:
-            bbox: [x1, y1, x2, y2]
-            vehicle_type: 'car', 'bus', or 'truck'
-
-        Returns:
-            Estimated depth in meters
-        """
-        dims = VEHICLE_DIMENSIONS.get(vehicle_type, VEHICLE_DIMENSIONS['car'])
-        pixel_height = bbox[3] - bbox[1]
-
-        if pixel_height < 10:
-            return 100.0  # Very far away, avoid division issues
-
-        depth = (dims['height'] * self.focal_length) / pixel_height
-        return max(depth, 2.0)  # Minimum 2m depth
-
-    def estimate_orientation(self, bbox):
-        """
-        Estimate the yaw angle (rotation around Y axis) of the vehicle
-        based on its position in the image.
-
-        Vehicles near the center tend to face away from camera (yaw ~ 0),
-        vehicles on the sides show more of their side profile.
-
-        Args:
-            bbox: [x1, y1, x2, y2]
-
-        Returns:
-            Estimated yaw angle in radians
-        """
-        center_x = (bbox[0] + bbox[2]) / 2.0
-        # Normalized position: -1 (left) to +1 (right)
-        norm_x = (center_x - self.frame_width / 2.0) / (self.frame_width / 2.0)
-
-        # Aspect ratio gives information about orientation
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-        aspect = w / max(h, 1)
-
-        # Heuristic: wider boxes (larger aspect ratio) indicate
-        # a more side-on view of the vehicle
-        if aspect > 1.8:
-            # Very wide = near side view
-            base_angle = np.pi / 2.0 * np.sign(norm_x) if abs(norm_x) > 0.1 else 0.0
-        else:
-            # Narrower = more rear/front view
-            base_angle = norm_x * np.pi / 4.0
-
-        return base_angle
-
     def estimate_3d_bbox(self, bbox, vehicle_type='car', track_id=None):
         """
-        Estimate the full 3D bounding box for a detected vehicle.
-
-        Inspired by the reconstruct_bb3d method in the reference repo's
-        PGP class, but using monocular depth estimation instead of
-        explicit ground plane + projection matrix reconstruction.
-
+        Estimate the full 3D bounding box using 2D-3D projection alignment.
+        This dynamically scales the 3D box's depth and rotation so its 2D projection
+        perfectly matches the dimensions of the YOLO 2D bounding box.
+        
         Args:
             bbox: [x1, y1, x2, y2]
             vehicle_type: 'car', 'bus', or 'truck'
             track_id: Optional tracking ID for temporal smoothing
 
         Returns:
-            dict with:
-                'corners_3d': 8x3 array of 3D corner coordinates
-                'center_3d': [X, Y, Z] center position
-                'dimensions': [h, w, l]
-                'yaw': rotation angle in radians
-                'depth': estimated depth
+            dict with 3D properties
         """
         dims = VEHICLE_DIMENSIONS.get(vehicle_type, VEHICLE_DIMENSIONS['car'])
         h, w, l = dims['height'], dims['width'], dims['length']
 
-        # Estimate depth and orientation
-        depth = self.estimate_depth(bbox, vehicle_type)
-        yaw = self.estimate_orientation(bbox)
+        x1, y1, x2, y2 = bbox
+        cx_2d = (x1 + x2) / 2.0
+        cy_2d = (y1 + y2) / 2.0
+        w_2d = max(x2 - x1, 1.0)
+        h_2d = max(y2 - y1, 1.0)
 
-        # Estimate 3D center position
-        center_x_px = (bbox[0] + bbox[2]) / 2.0
-        center_y_px = (bbox[1] + bbox[3]) / 2.0
+        # Baseline heuristic yaw to break 180-degree ties
+        # (Assuming cars tend to face somewhat away or towards the vanishing point)
+        norm_x = (cx_2d - self.frame_width / 2.0) / (self.frame_width / 2.0)
+        heuristic_yaw = norm_x * np.pi / 4.0
 
-        # Back-project center to 3D
-        X = (center_x_px - self.K[0, 2]) * depth / self.K[0, 0]
-        Y = (center_y_px - self.K[1, 2]) * depth / self.K[1, 1]
-        Z = depth
+        best_error = float('inf')
+        best_yaw = 0.0
+        best_Z = 10.0
 
-        center_3d = np.array([X, Y, Z])
+        # Grid search over yaw angles from -180 to 180 degrees
+        for yaw_deg in range(-180, 180, 5):
+            yaw = np.radians(yaw_deg)
+
+            # Test at an arbitrary depth to measure the projected aspect ratio
+            Z_test = 10.0
+            X_test = (cx_2d - self.K[0, 2]) * Z_test / self.K[0, 0]
+            Y_test = (cy_2d - self.K[1, 2]) * Z_test / self.K[1, 1]
+
+            corners_3d = self._create_box_corners(np.array([X_test, Y_test, Z_test]), h, w, l, yaw)
+            corners_2d = self.project_3d_to_2d(corners_3d)
+
+            proj_x_min, proj_x_max = np.min(corners_2d[:, 0]), np.max(corners_2d[:, 0])
+            proj_y_min, proj_y_max = np.min(corners_2d[:, 1]), np.max(corners_2d[:, 1])
+
+            proj_w = max(proj_x_max - proj_x_min, 1.0)
+            proj_h = max(proj_y_max - proj_y_min, 1.0)
+
+            # Calculate required depth to match the YOLO 2D bounding box dimensions
+            Z_req_w = Z_test * (proj_w / w_2d)
+            Z_req_h = Z_test * (proj_h / h_2d)
+
+            # Error measures aspect ratio mismatch (Z_req_w vs Z_req_h)
+            # plus a slight penalty for deviating from heuristic yaw to break symmetry
+            angular_diff = abs((yaw - heuristic_yaw + np.pi) % (2 * np.pi) - np.pi)
+            error = abs(Z_req_w - Z_req_h) + 0.5 * angular_diff
+
+            if error < best_error:
+                best_error = error
+                best_yaw = yaw
+                best_Z = (Z_req_w + Z_req_h) / 2.0
+
+        depth = best_Z
+        yaw = best_yaw
+        X = (cx_2d - self.K[0, 2]) * depth / self.K[0, 0]
+        Y = (cy_2d - self.K[1, 2]) * depth / self.K[1, 1]
+        
+        center_3d = np.array([X, Y, depth])
 
         # Apply EMA smoothing if tracking ID is provided
         if track_id is not None:
@@ -185,7 +160,6 @@ class PoseEstimator:
             }
 
         # Generate 3D bounding box corners (8 corners of a cuboid)
-        # Convention: Y is up in camera frame, so height goes in -Y
         corners_3d = self._create_box_corners(center_3d, h, w, l, yaw)
 
         return {
