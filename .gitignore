@@ -1,0 +1,18 @@
+# Ignore large videos
+*.mp4
+*.avi
+
+# Ignore deep learning weights
+*.pt
+*.caffemodel
+
+# Ignore FFmpeg executables
+ffmpeg-master-latest-win64-gpl/
+ffmpeg.exe
+ffmpeg.zip
+openh264-2.5.0-win64.dll
+
+# Ignore dataset folders
+kitti_dataset/
+__pycache__/
+src/__pycache__/
